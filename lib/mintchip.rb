@@ -62,6 +62,60 @@ module Mintchip
       encoded_value_request_message = Base64.strict_encode64(message.to_der)
     end
 
+    # this lets you validate a value message without loading/redeeming it
+    def validate_value_message(message)
+      message = OpenSSL::ASN1.decode(Base64.decode64(message))
+
+      # 1. Message Sanity Test
+      payer_cert_issuer_organization = asn1_data_lookup(message.value, [0,2,0,0,1,0,3,2,0,1])
+      raise Mintchip::FormatError, "invalid payer certificate issuer organization" if payer_cert_issuer_organization != "Royal Canadian Mint"
+
+
+      # 2. Verify Sender Certificate
+      payer_cert = asn1_data_lookup(message.value, [0,2,0,0,1,0])
+      payer_cert_signature_algorithm = asn1_data_lookup(message.value, [0,2,0,0,1,1,0])
+      payer_cert_signature = asn1_data_lookup(message.value, [0,2,0,0,1,2])
+      payer_cert_version = asn1_data_lookup(payer_cert, [0,0])
+      payer_cert_serial = asn1_data_lookup(payer_cert, [1])
+      payer_cert_signature_algorithm2 = asn1_data_lookup(payer_cert, [2,0])
+      # TODO: check the Sender's certificate was signed by one of the three MintChip CA certificates.
+
+
+      # 3. Verify Value Message
+      value_message = asn1_data_lookup(message.value, [0,2,0,0,0])
+
+      secure_element_version = asn1_data_lookup(value_message, [0])
+      payer_id = asn1_data_lookup(value_message, [1])
+      payee_id = asn1_data_lookup(value_message, [2])
+      currency = asn1_data_lookup(value_message, [3])
+      value = asn1_data_lookup(value_message, [4])
+      challenge = asn1_data_lookup(value_message, [5])
+      datetime = asn1_data_lookup(value_message, [6])
+      tac = asn1_data_lookup(value_message, [7])
+
+      value_transfer_message_plain_test_field = secure_element_version + payer_id + payee_id + currency + value + challenge + datetime + tac
+      
+      signature = asn1_data_lookup(value_message, [8])
+      # TODO: verify the vtmptf signature with the payer's pubkey
+
+
+      # 4. Challenge Check
+      # The idea here is to make sure our combination of: value, payee_id, challenge hasn't been redeemed before
+      # One way to implement this is to store the triplet every time load_value is successfull and check against it. A problem is that
+      # any value messages redeemed elsewhere would give a false valid. The only way to be sure it hasn't been redeemed before is to go
+      # ahead and redeem it, which would make this method redundant.
+
+
+      # 5. Parameter Check
+      valid_payee_id = to_padded_ascii_binary_coded_decimal(info.id, 64)
+      valid_currency = info.currency_code.chr
+
+      raise Mintchip::FormatError, "invalid currency" if currency != valid_currency 
+      raise Mintchip::FormatError, "invalid payee id" if payee_id != valid_payee_id
+      
+      true
+    end
+
     # POST /payments/request
     def create_value1(vrm)
       post "/payments/request", vrm, "application/vnd.scg.ecn-request"
@@ -102,6 +156,17 @@ module Mintchip
     end
 
     private
+
+    # this turns an ugly statement like this:
+    # payee_id = message.value[0].value[2].value[0].value[0].value[0].value[2].value
+    # into a somewhat less ugly statement:
+    # payee_id = asn1_data_lookup(message.value, [0,2,0,0,0,2,0])
+    def asn1_data_lookup(message, indices)
+      indices.each do |index|
+        message = message[index].value
+      end
+      message
+    end
 
     # converts an integer to a binary coded decimal string
     def to_binary_coded_decimal(n)
